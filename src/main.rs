@@ -1,7 +1,12 @@
 mod backend_action;
+mod fetcher;
+mod processor;
+
 use backend_action::BackendAction;
+use fetcher::fetch_html;
+use processor::clean_html;
 use std::io::{self, ErrorKind, Read, Write};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use tokio;
 
 fn main() {
@@ -22,6 +27,7 @@ fn main() {
             }
         }
 
+        // get raw json and deserialize
         let len = u32::from_ne_bytes(len_bytes) as usize;
         eprintln!("Success: Browser says incoming JSON is {} bytes long", len);
 
@@ -37,6 +43,7 @@ fn main() {
         #[derive(Deserialize)]
         struct BrowserMessage {
             query: String,
+            urls: Vec<String>,
         }
 
         let Ok(message) = serde_json::from_str::<BrowserMessage>(&raw_json) else {
@@ -44,6 +51,32 @@ fn main() {
             break;
         };
 
+        // async processing pipeline
+        tokio::spawn(async move {
+            // build vec with urls (fan out)
+            let mut fetch_futures = Vec::new();
+            for url in message.urls {
+                fetch_futures.push(fetch_html(url));
+            }
+
+            // create and fire background tasks for collected urls (fan in)
+            let results = futures::future::join_all(fetch_futures).await;
+
+            let mut context = String::new();
+
+            for result in results {
+                if let Ok(raw_html) = result {
+
+                    let clean_article = clean_html(&raw_html);
+
+                    context.push_str("--- SOURCE ---\n");
+                    context.push_str(&clean_article);
+                    context.push_str("\n\n");
+                }
+            }
+        });
+
+        // reply to browser
         let reply = BackendAction::RustReply {
             status: "Success".to_string(),
             received_query: message.query.clone(),
