@@ -1,8 +1,9 @@
 # ollamaview
-Custom Firefox / Librewolf AI Overview backend relying strictly on your local ollama models, written in Rust. Implemented right in your browser side panel, through the firefox extension.
+Custom Firefox / Librewolf AI Overview backend relying strictly on your local ollama models, written in Rust. <br>
+Implemented right in your browser side panel, through the Firefox extension.
 
 # dev setup:
-add 'com.<username>.ollamaview.json' file with following content:
+Add 'com.(username).ollamaview.json' file with following content to project root, adding your name and path to cargo binary:
 ```
 {
     "name": "com.<username>.ollamaview",

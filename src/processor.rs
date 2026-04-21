@@ -2,7 +2,7 @@ use readabilityrs::Readability;
 
 pub fn clean_html(html: &str) -> String {
 
-    let mut readability = match Readability::new(html, None, None) {
+    let readability = match Readability::new(html, None, None) {
         Ok(r) => r,
         Err(_) => return "Error: Failed to initialize parser".to_string(),
     };
