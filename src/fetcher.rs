@@ -77,8 +77,11 @@ fn percent_decode(input: &str) -> String {
 }
 
 pub async fn fetch_ddg_urls(subquery: &str, client: &Client, limit: usize) -> Vec<String> {
+    let base = std::env::var("OLLAMAVIEW_DDG_URL")
+        .unwrap_or_else(|_| "https://html.duckduckgo.com/html/".to_string());
     let search_url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
+        "{}?q={}",
+        base,
         url_encode_component(subquery)
     );
 

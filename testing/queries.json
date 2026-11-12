@@ -1,0 +1,82 @@
+{
+  "queries": [
+    {
+      "id": "q1_deep_needle_tokio",
+      "category": "1. Deep-Page Needle (BM25 & Context Depth)",
+      "query": "what is the default tokio blocking thread pool limit and keep-alive timeout",
+      "nuggets": [
+        "512",
+        "10 seconds",
+        "max_blocking_threads",
+        "thread_keep_alive",
+        "spawn_blocking"
+      ],
+      "fixture_count": 8
+    },
+    {
+      "id": "q2_deep_needle_sqlite",
+      "category": "1. Deep-Page Needle (BM25 & Context Depth)",
+      "query": "sqlite wal mode autocheckpoint default page threshold and busy_timeout",
+      "nuggets": [
+        "1000",
+        "4096",
+        "wal_autocheckpoint",
+        "SQLITE_BUSY",
+        "busy_timeout"
+      ],
+      "fixture_count": 8
+    },
+    {
+      "id": "q3_ambiguous_wayland",
+      "category": "2. Multi-Hop / Query Expansion",
+      "query": "firefox linux fractional scaling blurry xwayland fix",
+      "nuggets": [
+        "MOZ_ENABLE_WAYLAND",
+        "widget.wayland.fractional-scale.enabled",
+        "about:config",
+        "about:support",
+        "Window Protocol"
+      ],
+      "fixture_count": 8
+    },
+    {
+      "id": "q4_ambiguous_ollama_vram",
+      "category": "2. Multi-Hop / Query Expansion",
+      "query": "prevent ollama unloading model when running two models simultaneously",
+      "nuggets": [
+        "OLLAMA_MAX_LOADED_MODELS",
+        "OLLAMA_KEEP_ALIVE",
+        "OLLAMA_FLASH_ATTENTION",
+        "OLLAMA_KV_CACHE_TYPE",
+        "q8_0"
+      ],
+      "fixture_count": 8
+    },
+    {
+      "id": "q5_broad_compression",
+      "category": "3. Broad Multi-Source Synthesis (Sources N)",
+      "query": "zstd vs lz4 vs brotli compression speed and ratio tradeoffs",
+      "nuggets": [
+        "LZ4",
+        "500 MB/s",
+        "Zstandard",
+        "Brotli",
+        "--ultra"
+      ],
+      "fixture_count": 8
+    },
+    {
+      "id": "q6_direct_native_messaging",
+      "category": "4. Direct Fact Lookup (Baseline Speed)",
+      "query": "firefox native messaging maximum message size limit stdin stdout",
+      "nuggets": [
+        "1 MB",
+        "4 GB",
+        "32-bit",
+        "native byte order",
+        "allowed_extensions"
+      ],
+      "fixture_count": 8
+    }
+  ]
+}

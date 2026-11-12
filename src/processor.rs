@@ -63,7 +63,12 @@ fn tokenize_paragraph(text: &str) -> Vec<String> {
     extract_tokens(text)
 }
 
-pub fn clean_html(html: &str, query_terms: &[String], max_chars: usize) -> Option<String> {
+pub fn clean_html(
+    html: &str,
+    query_terms: &[String],
+    max_chars: usize,
+    use_bm25: bool,
+) -> Option<String> {
     let readability = Readability::new(html, None, None).ok()?;
     let article = readability.parse()?;
     let raw_text = article.text_content?;
@@ -85,8 +90,8 @@ pub fn clean_html(html: &str, query_terms: &[String], max_chars: usize) -> Optio
         return None;
     }
 
-    // Fast path: if the whole article fits in max_chars or no query terms exist, return sequentially
-    if total_chars <= max_chars || paragraphs.len() <= 2 || query_terms.is_empty() {
+    // Fast path: if the whole article fits in max_chars, BM25 is disabled, or no query terms exist, return sequentially
+    if !use_bm25 || total_chars <= max_chars || paragraphs.len() <= 2 || query_terms.is_empty() {
         let mut out = paragraphs.join("\n");
         if out.len() > max_chars {
             let boundary = out.floor_char_boundary(max_chars);

@@ -56,6 +56,8 @@ struct BrowserMessage {
     helper_model: String,
     #[serde(default)]
     response_language: String,
+    #[serde(default)]
+    bm25_enabled: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -304,12 +306,14 @@ async fn main() {
         let query_expansion = message.query_expansion;
         let helper_model = message.helper_model.trim().to_string();
         let response_language = message.response_language.trim().to_string();
+        let use_bm25 = message.bm25_enabled.unwrap_or(true);
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
 
         active_task = Some(tokio::spawn(async move {
             const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2400);
+            let task_start = Instant::now();
 
             // Scale source character budgets dynamically with chosen token context window and target_sources
             let max_total_context_chars = ((num_ctx.saturating_sub(1200)) as usize * 3).max(1800);
@@ -332,7 +336,7 @@ async fn main() {
                                 .map(|g| g.clone())
                                 .unwrap_or_default();
                             let cleaned = tokio::task::spawn_blocking(move || {
-                                clean_html(&raw_html, &snapshot, max_article_chars)
+                                clean_html(&raw_html, &snapshot, max_article_chars, use_bm25)
                             })
                             .await
                             .ok()
@@ -452,7 +456,7 @@ async fn main() {
                                                 .map(|g| g.clone())
                                                 .unwrap_or_default();
                                             let cleaned = tokio::task::spawn_blocking(move || {
-                                                clean_html(&raw_html, &snapshot, max_article_chars)
+                                                clean_html(&raw_html, &snapshot, max_article_chars, use_bm25)
                                             })
                                             .await
                                             .ok()
@@ -497,13 +501,16 @@ async fn main() {
                 }
             }
 
+            let fetch_ms = task_start.elapsed().as_millis();
             log_msg(
                 &current_state.log_path,
                 &format!(
-                    "Prepared context from {} sources ({} bytes, num_ctx={}) for query '{}'",
+                    "Prepared context from {} sources ({} bytes, num_ctx={}, bm25={}, fetch_ms={}) for query '{}'",
                     source_count,
                     context.len(),
                     num_ctx,
+                    use_bm25,
+                    fetch_ms,
                     query
                 ),
             );
