@@ -58,6 +58,8 @@ struct BrowserMessage {
     response_language: String,
     #[serde(default)]
     bm25_enabled: Option<bool>,
+    #[serde(default)]
+    include_citations: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +113,192 @@ fn sanitize_ollama_url(raw: &str) -> String {
     } else {
         format!("http://{}", trimmed)
     }
+}
+
+fn markdown_safe_url(url: &str) -> String {
+    url.trim()
+        .replace('(', "%28")
+        .replace(')', "%29")
+        .replace(' ', "%20")
+}
+
+fn short_source_label(url: &str) -> String {
+    let stripped = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .trim_end_matches('/');
+    let char_count = stripped.chars().count();
+    if char_count <= 58 {
+        stripped.to_string()
+    } else {
+        let head: String = stripped.chars().take(55).collect();
+        format!("{}…", head)
+    }
+}
+
+fn parse_citation_numbers(inner: &str, require_source_prefix: bool, max_source: usize) -> Option<Vec<usize>> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() || max_source == 0 {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let has_top_prefix = lower.starts_with("source ")
+        || lower.starts_with("sources ")
+        || lower.starts_with("source:")
+        || lower.starts_with("sources:");
+
+    if require_source_prefix && !has_top_prefix {
+        return None;
+    }
+
+    let mut nums = Vec::new();
+    for raw_part in trimmed.split(|c| c == ',' || c == ';') {
+        let mut part = raw_part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        let part_lower = part.to_ascii_lowercase();
+        for prefix in ["sources:", "source:", "sources", "source", "#"] {
+            if part_lower.starts_with(prefix) {
+                part = part[prefix.len()..].trim();
+                break;
+            }
+        }
+        if part.is_empty() {
+            return None;
+        }
+
+        if let Some((start_s, end_s)) = part.split_once('-').or_else(|| part.split_once('–')) {
+            let start_n: usize = start_s.trim().parse().ok()?;
+            let end_n: usize = end_s.trim().parse().ok()?;
+            if start_n == 0 || end_n < start_n || end_n - start_n > 10 {
+                return None;
+            }
+            for k in start_n..=end_n {
+                if k >= 1 && k <= max_source && !nums.contains(&k) {
+                    nums.push(k);
+                }
+            }
+        } else {
+            let k: usize = part.parse().ok()?;
+            if k == 0 {
+                return None;
+            }
+            if k <= max_source && !nums.contains(&k) {
+                nums.push(k);
+            }
+        }
+    }
+
+    if nums.is_empty() {
+        None
+    } else {
+        Some(nums)
+    }
+}
+
+fn linkify_line_citations(line: &str, safe_urls: &[String]) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(line.len() + 64);
+    let mut i = 0;
+    let mut in_inline_code = false;
+
+    while i < len {
+        let ch = chars[i];
+        if ch == '`' {
+            in_inline_code = !in_inline_code;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if !in_inline_code && (ch == '[' || ch == '(') {
+            let prev_is_ident = if i > 0 {
+                let p = chars[i - 1];
+                p.is_alphanumeric() || p == '_' || p == '!'
+            } else {
+                false
+            };
+
+            let close_ch = if ch == '[' { ']' } else { ')' };
+            if !prev_is_ident {
+                let mut close_idx = None;
+                for j in (i + 1)..len.min(i + 48) {
+                    if chars[j] == close_ch {
+                        close_idx = Some(j);
+                        break;
+                    }
+                    if chars[j] == '[' || chars[j] == '(' || chars[j] == '`' {
+                        break;
+                    }
+                }
+
+                if let Some(j) = close_idx {
+                    let followed_by_paren = j + 1 < len && chars[j + 1] == '(';
+                    if !followed_by_paren {
+                        let inner: String = chars[(i + 1)..j].iter().collect();
+                        let require_prefix = ch == '(';
+                        if let Some(indices) = parse_citation_numbers(&inner, require_prefix, safe_urls.len()) {
+                            for (idx_pos, k) in indices.iter().enumerate() {
+                                if idx_pos > 0 {
+                                    out.push(' ');
+                                }
+                                out.push_str(&format!("[{}]({})", k, safe_urls[k - 1]));
+                            }
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        out.push(ch);
+        i += 1;
+    }
+
+    out
+}
+
+fn format_with_citations(text: &str, sources: &[String], append_footer: bool) -> String {
+    if sources.is_empty() || text.trim().is_empty() {
+        return text.to_string();
+    }
+
+    let safe_urls: Vec<String> = sources.iter().map(|u| markdown_safe_url(u)).collect();
+    let mut out_lines = Vec::new();
+    let mut in_fenced_code = false;
+
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fenced_code = !in_fenced_code;
+            out_lines.push(line.to_string());
+        } else if in_fenced_code {
+            out_lines.push(line.to_string());
+        } else {
+            out_lines.push(linkify_line_citations(line, &safe_urls));
+        }
+    }
+
+    let mut result = out_lines.join("\n");
+    if append_footer {
+        result.push_str("\n\n---\n");
+        for (idx, raw_url) in sources.iter().enumerate() {
+            let num = idx + 1;
+            let safe_url = &safe_urls[idx];
+            let label = short_source_label(raw_url);
+            result.push_str(&format!(
+                "- [{}]({}) [{}]({})\n",
+                num, safe_url, label, safe_url
+            ));
+        }
+    }
+
+    result
 }
 
 #[tokio::main]
@@ -307,6 +495,7 @@ async fn main() {
         let helper_model = message.helper_model.trim().to_string();
         let response_language = message.response_language.trim().to_string();
         let use_bm25 = message.bm25_enabled.unwrap_or(true);
+        let include_citations = message.include_citations.unwrap_or(true);
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
@@ -510,6 +699,7 @@ async fn main() {
                 .unwrap_or_default();
 
             let mut context = String::new();
+            let mut used_sources: Vec<String> = Vec::new();
             let mut source_count = 0usize;
             for (url, raw_html) in selected_raw {
                 let terms_clone = final_query_terms.clone();
@@ -525,6 +715,7 @@ async fn main() {
                     context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
                     context.push_str(&clean_article);
                     context.push_str("\n\n");
+                    used_sources.push(url);
                     if source_count >= target_sources || context.len() >= max_total_context_chars {
                         break;
                     }
@@ -554,6 +745,12 @@ async fn main() {
                 )
             };
 
+            let citation_directive = if include_citations && !used_sources.is_empty() {
+                "\nIMPORTANT: Support factual claims with inline bracketed source numbers like [1] or [2] that correspond to the numbered --- SOURCE N --- sections in the Context. Only cite source numbers that exist in the Context."
+            } else {
+                ""
+            };
+
             let full_prompt = if context.is_empty() {
                 format!(
                     "{}\n{}\n\n(Note: No external webpage content could be extracted.)\n\nQuery: {}",
@@ -561,8 +758,8 @@ async fn main() {
                 )
             } else {
                 format!(
-                    "{}\n{}\n\nContext:\n{}\nQuery: {}",
-                    system_prompt, lang_directive, context, query
+                    "{}\n{}{}\n\nContext:\n{}\nQuery: {}",
+                    system_prompt, lang_directive, citation_directive, context, query
                 )
             };
 
@@ -611,9 +808,15 @@ async fn main() {
                     let mut last_send = Instant::now();
                     let mut stream_err: Option<String> = None;
 
-                    let format_display = |think_txt: &str, resp_txt: &str| -> String {
-                        if think_txt.trim().is_empty() {
+                    let format_display = |think_txt: &str, resp_txt: &str, is_final: bool| -> String {
+                        let rendered_resp = if include_citations && !used_sources.is_empty() {
+                            format_with_citations(resp_txt, &used_sources, is_final)
+                        } else {
                             resp_txt.to_string()
+                        };
+
+                        if think_txt.trim().is_empty() {
+                            rendered_resp
                         } else {
                             let quoted_think = think_txt
                                 .trim()
@@ -621,10 +824,10 @@ async fn main() {
                                 .map(|l| format!("> {}", l))
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            if resp_txt.is_empty() {
+                            if rendered_resp.is_empty() {
                                 format!("> **Thinking...**\n{}\n", quoted_think)
                             } else {
-                                format!("> **Thought Process**\n{}\n\n---\n\n{}", quoted_think, resp_txt)
+                                format!("> **Thought Process**\n{}\n\n---\n\n{}", quoted_think, rendered_resp)
                             }
                         }
                     };
@@ -678,7 +881,7 @@ async fn main() {
                                                     .send(BackendAction::RustReply {
                                                         status: "Streaming".to_string(),
                                                         received_query: query.clone(),
-                                                        message: format_display(&thinking_buf, &accumulated),
+                                                        message: format_display(&thinking_buf, &accumulated, false),
                                                     })
                                                     .await;
                                             }
@@ -697,7 +900,7 @@ async fn main() {
                         }
                     }
 
-                    let combined = format_display(&thinking_buf, &accumulated);
+                    let combined = format_display(&thinking_buf, &accumulated, true);
                     let (final_status, final_message) = if let Some(err) = stream_err {
                         (
                             "Error".to_string(),

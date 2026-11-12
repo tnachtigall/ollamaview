@@ -642,6 +642,7 @@ def main():
                 "contextSize": cfg["contextSize"],
                 "bm25Enabled": cfg["bm25Enabled"],
                 "queryExpansion": cfg["queryExpansion"],
+                "includeCitations": False,
                 "responseLanguage": "English",
                 "systemPrompt": DEFAULT_SYSTEM_PROMPT,
             }
