@@ -552,7 +552,15 @@ async fn main() {
 
                 tokio::spawn(async move {
                     let exp_prompt = format!(
-                        "Generate 2 concise web search queries to find comprehensive factual information for: \"{}\"\nOutput ONLY the 2 queries, one per line, with no numbering, bullets, or explanation.",
+                        "You are an orthogonal search query facet expander. Given the user query: \"{}\"\n\
+                        Generate 2 web search queries that preserve the exact technical depth and complexity of the original query while expanding it along distinct, orthogonal facets:\n\
+                        - Facet 1: Target concrete specifications, configuration parameters, exact API/flag names, or underlying mechanisms.\n\
+                        - Facet 2: Target practical edge cases, trade-offs, troubleshooting root causes, or empirical comparisons/benchmarks.\n\
+                        Rules:\n\
+                        - Retain the core entities and technical specificity of the original query.\n\
+                        - Do NOT simplify, generalize, or turn the query into a broad introductory explainer.\n\
+                        - Keep the same language as the original query.\n\
+                        - Output ONLY the 2 search queries, one per line, with no numbering, labels, bullets, or quotes.",
                         query_exp
                     );
                     let req = OllamaRequest {
@@ -583,7 +591,21 @@ async fn main() {
 
                     let subqueries: Vec<String> = text
                         .lines()
-                        .map(|l| l.trim().trim_matches(|c: char| c == '-' || c == '*' || c == '"').trim().to_string())
+                        .map(|l| {
+                            let mut s = l.trim().trim_matches(|c: char| c == '-' || c == '*' || c == '"' || c == '\'').trim();
+                            // Strip optional leading numbering or facet labels like "1.", "2)", "Facet 1:", "Query 1:"
+                            if let Some(rest) = s.strip_prefix("1.").or_else(|| s.strip_prefix("2.")).or_else(|| s.strip_prefix("1)")).or_else(|| s.strip_prefix("2)")) {
+                                s = rest.trim();
+                            }
+                            let lower = s.to_ascii_lowercase();
+                            for prefix in ["facet 1:", "facet 2:", "query 1:", "query 2:"] {
+                                if lower.starts_with(prefix) {
+                                    s = s[prefix.len()..].trim();
+                                    break;
+                                }
+                            }
+                            s.trim_matches(|c: char| c == '"' || c == '\'').trim().to_string()
+                        })
                         .filter(|l| l.len() >= 3)
                         .take(2)
                         .collect();
