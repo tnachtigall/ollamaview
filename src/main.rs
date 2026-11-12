@@ -44,6 +44,8 @@ struct BrowserMessage {
     #[serde(default)]
     system_prompt: String,
     #[serde(default)]
+    max_sources: Option<usize>,
+    #[serde(default)]
     context_size: Option<u32>,
 }
 
@@ -285,19 +287,18 @@ async fn main() {
         } else {
             message.system_prompt.trim().to_string()
         };
+        let target_sources = message.max_sources.unwrap_or(5).clamp(1, 8);
         let num_ctx = message.context_size.unwrap_or(4096).clamp(1024, 32768);
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
 
         active_task = Some(tokio::spawn(async move {
-            const TARGET_FAST_SOURCES: usize = 3;
             const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2200);
-            const GRACE_AFTER_QUORUM: Duration = Duration::from_millis(250);
 
-            // Scale source character budgets dynamically with chosen token context window
+            // Scale source character budgets dynamically with chosen token context window and target_sources
             let max_total_context_chars = ((num_ctx.saturating_sub(1200)) as usize * 3).max(1800);
-            let max_article_chars = (max_total_context_chars / 3).clamp(900, 12000);
+            let max_article_chars = (max_total_context_chars / target_sources).clamp(700, 12000);
 
             let mut fetch_stream: FuturesUnordered<_> = urls
                 .into_iter()
@@ -326,30 +327,22 @@ async fn main() {
             let mut context = String::new();
             let mut source_count = 0usize;
             let overall_deadline = tokio::time::Instant::now() + OVERALL_FETCH_DEADLINE;
-            let mut quorum_deadline: Option<tokio::time::Instant> = None;
 
             loop {
-                let effective_deadline = match quorum_deadline {
-                    Some(qd) if qd < overall_deadline => qd,
-                    _ => overall_deadline,
-                };
-
-                match tokio::time::timeout_at(effective_deadline, fetch_stream.next()).await {
+                match tokio::time::timeout_at(overall_deadline, fetch_stream.next()).await {
                     Ok(Some(Some((url, clean_article)))) => {
                         source_count += 1;
                         context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
                         context.push_str(&clean_article);
                         context.push_str("\n\n");
 
-                        if context.len() >= max_total_context_chars {
+                        // Stop immediately once we reach the requested number of usable sources or total budget
+                        if source_count >= target_sources || context.len() >= max_total_context_chars {
                             break;
-                        }
-                        if source_count >= TARGET_FAST_SOURCES && quorum_deadline.is_none() {
-                            quorum_deadline = Some(tokio::time::Instant::now() + GRACE_AFTER_QUORUM);
                         }
                     }
                     Ok(Some(None)) => {
-                        // A URL failed or yielded empty text; continue waiting for remaining futures
+                        // A URL failed or yielded empty text; continue waiting for remaining candidate URLs
                     }
                     Ok(None) | Err(_) => {
                         // All URLs completed or deadline reached — proceed immediately to Ollama

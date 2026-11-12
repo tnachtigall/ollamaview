@@ -21,7 +21,8 @@ pub fn clean_html(html: &str, max_chars: usize) -> Option<String> {
         }
     }
 
-    if normalized.is_empty() {
+    // Reject thin stubs (e.g. cookie walls or "enable JavaScript" notices) so they don't consume a source slot
+    if normalized.len() < 200 {
         return None;
     }
 
