@@ -41,3 +41,75 @@ pub async fn fetch_html(url: &str, client: &Client) -> Result<String, String> {
 
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
+
+fn url_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub async fn fetch_ddg_urls(subquery: &str, client: &Client, limit: usize) -> Vec<String> {
+    let search_url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        url_encode_component(subquery)
+    );
+
+    let Ok(resp) = client
+        .get(&search_url)
+        .timeout(Duration::from_millis(1500))
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+
+    let Ok(html) = resp.text().await else {
+        return Vec::new();
+    };
+
+    let mut urls = Vec::new();
+    for segment in html.split("uddg=") {
+        if let Some(end_idx) = segment.find(|c| c == '&' || c == '"' || c == '\'') {
+            let encoded = &segment[..end_idx];
+            let decoded = percent_decode(encoded);
+            if (decoded.starts_with("http://") || decoded.starts_with("https://"))
+                && !decoded.contains("duckduckgo.com")
+                && !urls.contains(&decoded)
+            {
+                urls.push(decoded);
+                if urls.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    urls
+}

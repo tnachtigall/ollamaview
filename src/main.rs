@@ -3,14 +3,15 @@ mod fetcher;
 mod processor;
 
 use backend_action::BackendAction;
-use fetcher::fetch_html;
+use fetcher::{fetch_ddg_urls, fetch_html};
 use futures::stream::{FuturesUnordered, StreamExt};
 use processor::{clean_html, tokenize_query};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -49,6 +50,10 @@ struct BrowserMessage {
     context_size: Option<u32>,
     #[serde(default)]
     thinking_mode: bool,
+    #[serde(default)]
+    query_expansion: bool,
+    #[serde(default)]
+    helper_model: String,
 }
 
 #[derive(Serialize)]
@@ -294,66 +299,197 @@ async fn main() {
         let target_sources = message.max_sources.unwrap_or(5).clamp(1, 8);
         let num_ctx = message.context_size.unwrap_or(4096).clamp(1024, 32768);
         let thinking_mode = message.thinking_mode;
+        let query_expansion = message.query_expansion;
+        let helper_model = message.helper_model.trim().to_string();
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
 
         active_task = Some(tokio::spawn(async move {
-            const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2200);
+            const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2400);
 
             // Scale source character budgets dynamically with chosen token context window and target_sources
             let max_total_context_chars = ((num_ctx.saturating_sub(1200)) as usize * 3).max(1800);
             let max_article_chars = (max_total_context_chars / target_sources).clamp(700, 12000);
-            let query_terms = Arc::new(tokenize_query(&query));
+            let shared_query_terms = Arc::new(RwLock::new(tokenize_query(&query)));
 
-            let mut fetch_stream: FuturesUnordered<_> = urls
-                .into_iter()
-                .map(|url| {
-                    let state_ref = Arc::clone(&current_state);
-                    let terms_ref = Arc::clone(&query_terms);
-                    async move {
-                        match fetch_html(&url, &state_ref.client).await {
-                            Ok(raw_html) => {
-                                let cleaned = tokio::task::spawn_blocking(move || {
-                                    clean_html(&raw_html, &terms_ref, max_article_chars)
-                                })
-                                .await
-                                .ok()
-                                .flatten();
-                                cleaned.map(|text| (url, text))
-                            }
-                            Err(err) => {
-                                log_msg(&state_ref.log_path, &err);
-                                None
+            let mut seen_urls: HashSet<String> = urls.iter().cloned().collect();
+            let mut fetch_stream: FuturesUnordered<
+                std::pin::Pin<Box<dyn std::future::Future<Output = Option<(String, String)>> + Send>>,
+            > = FuturesUnordered::new();
+
+            for url in urls {
+                let state_ref = Arc::clone(&current_state);
+                let terms_ref = Arc::clone(&shared_query_terms);
+                fetch_stream.push(Box::pin(async move {
+                    match fetch_html(&url, &state_ref.client).await {
+                        Ok(raw_html) => {
+                            let snapshot = terms_ref
+                                .read()
+                                .map(|g| g.clone())
+                                .unwrap_or_default();
+                            let cleaned = tokio::task::spawn_blocking(move || {
+                                clean_html(&raw_html, &snapshot, max_article_chars)
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            cleaned.map(|text| (url, text))
+                        }
+                        Err(err) => {
+                            log_msg(&state_ref.log_path, &err);
+                            None
+                        }
+                    }
+                }));
+            }
+
+            // Optional parallel Stage-1 helper model for query expansion
+            let mut expansion_rx = if query_expansion && !helper_model.is_empty() {
+                let (exp_tx, exp_rx) = mpsc::channel::<Vec<String>>(1);
+                let state_exp = Arc::clone(&current_state);
+                let terms_exp = Arc::clone(&shared_query_terms);
+                let ollama_exp = ollama_instance.clone();
+                let query_exp = query.clone();
+                let model_exp = helper_model.clone();
+
+                tokio::spawn(async move {
+                    let exp_prompt = format!(
+                        "Generate 2 concise web search queries to find comprehensive factual information for: \"{}\"\nOutput ONLY the 2 queries, one per line, with no numbering, bullets, or explanation.",
+                        query_exp
+                    );
+                    let req = OllamaRequest {
+                        model: model_exp.clone(),
+                        prompt: exp_prompt,
+                        stream: false,
+                        think: false,
+                        keep_alive: "15m",
+                        options: OllamaOptions { num_ctx: 1024 },
+                    };
+                    let endpoint = format!("{}/api/generate", ollama_exp);
+                    let Ok(Ok(resp)) = tokio::time::timeout(
+                        Duration::from_millis(1500),
+                        state_exp.client.post(&endpoint).json(&req).send(),
+                    )
+                    .await
+                    else {
+                        log_msg(&state_exp.log_path, "Helper model query expansion timed out or failed");
+                        return;
+                    };
+
+                    let Ok(ollama_res) = resp.json::<OllamaResponse>().await else {
+                        return;
+                    };
+                    let Some(text) = ollama_res.response else {
+                        return;
+                    };
+
+                    let subqueries: Vec<String> = text
+                        .lines()
+                        .map(|l| l.trim().trim_matches(|c: char| c == '-' || c == '*' || c == '"').trim().to_string())
+                        .filter(|l| l.len() >= 3)
+                        .take(2)
+                        .collect();
+
+                    if subqueries.is_empty() {
+                        return;
+                    }
+
+                    log_msg(
+                        &state_exp.log_path,
+                        &format!("Helper model '{}' expanded subqueries: {:?}", model_exp, subqueries),
+                    );
+
+                    // Enrich BM25 scoring vocabulary with expanded query terms
+                    if let Ok(mut guard) = terms_exp.write() {
+                        for sq in &subqueries {
+                            for tok in tokenize_query(sq) {
+                                if !guard.contains(&tok) {
+                                    guard.push(tok);
+                                }
                             }
                         }
                     }
-                })
-                .collect();
+
+                    let ddg_futs = subqueries
+                        .iter()
+                        .map(|sq| fetch_ddg_urls(sq, &state_exp.client, 2));
+                    let extra_batches = futures::future::join_all(ddg_futs).await;
+                    let extra_urls: Vec<String> = extra_batches.into_iter().flatten().collect();
+                    let _ = exp_tx.send(extra_urls).await;
+                });
+                Some(exp_rx)
+            } else {
+                None
+            };
 
             let mut context = String::new();
             let mut source_count = 0usize;
             let overall_deadline = tokio::time::Instant::now() + OVERALL_FETCH_DEADLINE;
 
             loop {
-                match tokio::time::timeout_at(overall_deadline, fetch_stream.next()).await {
-                    Ok(Some(Some((url, clean_article)))) => {
-                        source_count += 1;
-                        context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
-                        context.push_str(&clean_article);
-                        context.push_str("\n\n");
-
-                        // Stop immediately once we reach the requested number of usable sources or total budget
-                        if source_count >= target_sources || context.len() >= max_total_context_chars {
-                            break;
+                tokio::select! {
+                    biased;
+                    Some(extra_urls) = async {
+                        match expansion_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        expansion_rx = None;
+                        for url in extra_urls {
+                            if seen_urls.insert(url.clone()) {
+                                let state_ref = Arc::clone(&current_state);
+                                let terms_ref = Arc::clone(&shared_query_terms);
+                                fetch_stream.push(Box::pin(async move {
+                                    match fetch_html(&url, &state_ref.client).await {
+                                        Ok(raw_html) => {
+                                            let snapshot = terms_ref
+                                                .read()
+                                                .map(|g| g.clone())
+                                                .unwrap_or_default();
+                                            let cleaned = tokio::task::spawn_blocking(move || {
+                                                clean_html(&raw_html, &snapshot, max_article_chars)
+                                            })
+                                            .await
+                                            .ok()
+                                            .flatten();
+                                            cleaned.map(|text| (url, text))
+                                        }
+                                        Err(err) => {
+                                            log_msg(&state_ref.log_path, &err);
+                                            None
+                                        }
+                                    }
+                                }));
+                            }
                         }
                     }
-                    Ok(Some(None)) => {
-                        // A URL failed or yielded empty text; continue waiting for remaining candidate URLs
-                    }
-                    Ok(None) | Err(_) => {
-                        // All URLs completed or deadline reached — proceed immediately to Ollama
-                        break;
+                    fetch_res = tokio::time::timeout_at(overall_deadline, fetch_stream.next()) => {
+                        match fetch_res {
+                            Ok(Some(Some((url, clean_article)))) => {
+                                source_count += 1;
+                                context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
+                                context.push_str(&clean_article);
+                                context.push_str("\n\n");
+
+                                if source_count >= target_sources || context.len() >= max_total_context_chars {
+                                    break;
+                                }
+                            }
+                            Ok(Some(None)) => {
+                                // A URL failed or yielded empty text; continue waiting for remaining candidate URLs
+                            }
+                            Ok(None) => {
+                                if expansion_rx.is_none() {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                // Overall fetch deadline reached — proceed immediately to Ollama
+                                break;
+                            }
+                        }
                     }
                 }
             }
