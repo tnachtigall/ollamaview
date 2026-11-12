@@ -47,6 +47,8 @@ struct BrowserMessage {
     max_sources: Option<usize>,
     #[serde(default)]
     context_size: Option<u32>,
+    #[serde(default)]
+    thinking_mode: bool,
 }
 
 #[derive(Serialize)]
@@ -59,6 +61,7 @@ struct OllamaRequest {
     model: String,
     prompt: String,
     stream: bool,
+    think: bool,
     keep_alive: &'static str,
     options: OllamaOptions,
 }
@@ -66,6 +69,7 @@ struct OllamaRequest {
 #[derive(Deserialize)]
 struct OllamaResponse {
     response: Option<String>,
+    thinking: Option<String>,
     error: Option<String>,
     #[serde(default)]
     done: bool,
@@ -289,6 +293,7 @@ async fn main() {
         };
         let target_sources = message.max_sources.unwrap_or(5).clamp(1, 8);
         let num_ctx = message.context_size.unwrap_or(4096).clamp(1024, 32768);
+        let thinking_mode = message.thinking_mode;
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
@@ -375,6 +380,7 @@ async fn main() {
                 model: main_model,
                 prompt: full_prompt,
                 stream: true,
+                think: thinking_mode,
                 keep_alive: "15m",
                 options: OllamaOptions { num_ctx },
             };
@@ -409,10 +415,29 @@ async fn main() {
                     }
 
                     let mut accumulated = String::new();
+                    let mut thinking_buf = String::new();
                     let mut line_buf = Vec::new();
                     let mut sent_first_token = false;
                     let mut last_send = Instant::now();
                     let mut stream_err: Option<String> = None;
+
+                    let format_display = |think_txt: &str, resp_txt: &str| -> String {
+                        if think_txt.trim().is_empty() {
+                            resp_txt.to_string()
+                        } else {
+                            let quoted_think = think_txt
+                                .trim()
+                                .lines()
+                                .map(|l| format!("> {}", l))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if resp_txt.is_empty() {
+                                format!("> **Thinking...**\n{}\n", quoted_think)
+                            } else {
+                                format!("> **Thought Process**\n{}\n\n---\n\n{}", quoted_think, resp_txt)
+                            }
+                        }
+                    };
 
                     loop {
                         match response.chunk().await {
@@ -436,24 +461,36 @@ async fn main() {
                                             stream_err = Some(format!("Ollama error: {}", err));
                                             break;
                                         }
+                                        let mut updated = false;
+                                        if thinking_mode {
+                                            if let Some(think_tok) = part.thinking {
+                                                if !think_tok.is_empty() {
+                                                    thinking_buf.push_str(&think_tok);
+                                                    updated = true;
+                                                }
+                                            }
+                                        }
                                         if let Some(token) = part.response {
                                             if !token.is_empty() {
                                                 accumulated.push_str(&token);
-                                                let should_flush = !sent_first_token
-                                                    || part.done
-                                                    || last_send.elapsed()
-                                                        >= Duration::from_millis(40);
-                                                if should_flush {
-                                                    sent_first_token = true;
-                                                    last_send = Instant::now();
-                                                    let _ = tx_clone
-                                                        .send(BackendAction::RustReply {
-                                                            status: "Streaming".to_string(),
-                                                            received_query: query.clone(),
-                                                            message: accumulated.clone(),
-                                                        })
-                                                        .await;
-                                                }
+                                                updated = true;
+                                            }
+                                        }
+                                        if updated {
+                                            let should_flush = !sent_first_token
+                                                || part.done
+                                                || last_send.elapsed()
+                                                    >= Duration::from_millis(40);
+                                            if should_flush {
+                                                sent_first_token = true;
+                                                last_send = Instant::now();
+                                                let _ = tx_clone
+                                                    .send(BackendAction::RustReply {
+                                                        status: "Streaming".to_string(),
+                                                        received_query: query.clone(),
+                                                        message: format_display(&thinking_buf, &accumulated),
+                                                    })
+                                                    .await;
                                             }
                                         }
                                     }
@@ -470,22 +507,23 @@ async fn main() {
                         }
                     }
 
+                    let combined = format_display(&thinking_buf, &accumulated);
                     let (final_status, final_message) = if let Some(err) = stream_err {
                         (
                             "Error".to_string(),
-                            if accumulated.is_empty() {
+                            if combined.is_empty() {
                                 err
                             } else {
-                                format!("{}\n\n[{}]", accumulated, err)
+                                format!("{}\n\n[{}]", combined, err)
                             },
                         )
-                    } else if accumulated.is_empty() {
+                    } else if combined.is_empty() {
                         (
                             "Error".to_string(),
                             "Empty response from Ollama.".to_string(),
                         )
                     } else {
-                        ("Success".to_string(), accumulated)
+                        ("Success".to_string(), combined)
                     };
 
                     let _ = tx_clone
