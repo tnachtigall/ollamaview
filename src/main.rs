@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-const SYSTEM_PROMPT: &str = "You are a helpful, privacy-focused search assistant. \
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful, privacy-focused search assistant. \
 Using the provided web search sources, write a clear, concise, and accurate overview \
 that directly answers the user's search query. Format your response in clean Markdown \
 (such as bullet points, bold key terms, and short sections where helpful). Synthesize \
@@ -40,6 +40,8 @@ struct BrowserMessage {
     ollama_instance: String,
     #[serde(default)]
     main_model: String,
+    #[serde(default)]
+    system_prompt: String,
 }
 
 #[derive(Serialize)]
@@ -264,6 +266,11 @@ async fn main() {
         let main_model = message.main_model;
         let query = message.query;
         let urls = message.urls;
+        let system_prompt = if message.system_prompt.trim().is_empty() {
+            DEFAULT_SYSTEM_PROMPT.to_string()
+        } else {
+            message.system_prompt.trim().to_string()
+        };
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
@@ -314,10 +321,10 @@ async fn main() {
             let full_prompt = if context.is_empty() {
                 format!(
                     "{}\n\n(Note: No external webpage content could be extracted.)\n\nQuery: {}",
-                    SYSTEM_PROMPT, query
+                    system_prompt, query
                 )
             } else {
-                format!("{}\n\nContext:\n{}\nQuery: {}", SYSTEM_PROMPT, context, query)
+                format!("{}\n\nContext:\n{}\nQuery: {}", system_prompt, context, query)
             };
 
             let ollama_req = OllamaRequest {
