@@ -27,3 +27,4 @@ target
 
  # TODO: generalize with regex
 com.till.ollamaview.json
+.aider*
