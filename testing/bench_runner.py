@@ -601,9 +601,9 @@ def main():
         for exp in [False, True]:
             configs.append({
                 "sweep": "Sweep 3: Multi-Model Query Expansion",
-                "label": f"Expansion={'ON (' + args.helper_model + ')' if exp else 'OFF (Baseline)'} (N=3, ctx=4096)",
+                "label": f"Expansion={'ON (' + args.helper_model + ')' if exp else 'OFF (Baseline)'} (N=5, ctx=4096)",
                 "contextSize": 4096,
-                "maxSources": 3,
+                "maxSources": 5,
                 "bm25Enabled": True,
                 "queryExpansion": exp,
             })
