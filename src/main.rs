@@ -4,13 +4,14 @@ mod processor;
 
 use backend_action::BackendAction;
 use fetcher::fetch_html;
+use futures::stream::{FuturesUnordered, StreamExt};
 use processor::clean_html;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -42,6 +43,13 @@ struct BrowserMessage {
     main_model: String,
     #[serde(default)]
     system_prompt: String,
+    #[serde(default)]
+    context_size: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
+    num_ctx: u32,
 }
 
 #[derive(Serialize)]
@@ -49,12 +57,16 @@ struct OllamaRequest {
     model: String,
     prompt: String,
     stream: bool,
+    keep_alive: &'static str,
+    options: OllamaOptions,
 }
 
 #[derive(Deserialize)]
 struct OllamaResponse {
     response: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    done: bool,
 }
 
 #[derive(Deserialize)]
@@ -101,7 +113,9 @@ async fn main() {
 
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0")
-        .connect_timeout(Duration::from_secs(4))
+        .connect_timeout(Duration::from_millis(1800))
+        .pool_max_idle_per_host(8)
+        .tcp_nodelay(true)
         .build()
         .expect("Failed to initialize HTTP client");
 
@@ -271,49 +285,86 @@ async fn main() {
         } else {
             message.system_prompt.trim().to_string()
         };
+        let num_ctx = message.context_size.unwrap_or(4096).clamp(1024, 32768);
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
 
         active_task = Some(tokio::spawn(async move {
-            // Fetch and clean all scraped URLs concurrently
-            let fetch_futures = urls.into_iter().map(|url| {
-                let state_ref = Arc::clone(&current_state);
-                async move {
-                    match fetch_html(&url, &state_ref.client).await {
-                        Ok(raw_html) => {
-                            let cleaned =
-                                tokio::task::spawn_blocking(move || clean_html(&raw_html))
-                                    .await
-                                    .ok()
-                                    .flatten();
-                            cleaned.map(|text| (url, text))
-                        }
-                        Err(err) => {
-                            log_msg(&state_ref.log_path, &err);
-                            None
+            const TARGET_FAST_SOURCES: usize = 3;
+            const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2200);
+            const GRACE_AFTER_QUORUM: Duration = Duration::from_millis(250);
+
+            // Scale source character budgets dynamically with chosen token context window
+            let max_total_context_chars = ((num_ctx.saturating_sub(1200)) as usize * 3).max(1800);
+            let max_article_chars = (max_total_context_chars / 3).clamp(900, 12000);
+
+            let mut fetch_stream: FuturesUnordered<_> = urls
+                .into_iter()
+                .map(|url| {
+                    let state_ref = Arc::clone(&current_state);
+                    async move {
+                        match fetch_html(&url, &state_ref.client).await {
+                            Ok(raw_html) => {
+                                let cleaned = tokio::task::spawn_blocking(move || {
+                                    clean_html(&raw_html, max_article_chars)
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                                cleaned.map(|text| (url, text))
+                            }
+                            Err(err) => {
+                                log_msg(&state_ref.log_path, &err);
+                                None
+                            }
                         }
                     }
-                }
-            });
+                })
+                .collect();
 
-            let results = futures::future::join_all(fetch_futures).await;
             let mut context = String::new();
             let mut source_count = 0usize;
+            let overall_deadline = tokio::time::Instant::now() + OVERALL_FETCH_DEADLINE;
+            let mut quorum_deadline: Option<tokio::time::Instant> = None;
 
-            for (url, clean_article) in results.into_iter().flatten() {
-                source_count += 1;
-                context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
-                context.push_str(&clean_article);
-                context.push_str("\n\n");
+            loop {
+                let effective_deadline = match quorum_deadline {
+                    Some(qd) if qd < overall_deadline => qd,
+                    _ => overall_deadline,
+                };
+
+                match tokio::time::timeout_at(effective_deadline, fetch_stream.next()).await {
+                    Ok(Some(Some((url, clean_article)))) => {
+                        source_count += 1;
+                        context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
+                        context.push_str(&clean_article);
+                        context.push_str("\n\n");
+
+                        if context.len() >= max_total_context_chars {
+                            break;
+                        }
+                        if source_count >= TARGET_FAST_SOURCES && quorum_deadline.is_none() {
+                            quorum_deadline = Some(tokio::time::Instant::now() + GRACE_AFTER_QUORUM);
+                        }
+                    }
+                    Ok(Some(None)) => {
+                        // A URL failed or yielded empty text; continue waiting for remaining futures
+                    }
+                    Ok(None) | Err(_) => {
+                        // All URLs completed or deadline reached — proceed immediately to Ollama
+                        break;
+                    }
+                }
             }
 
             log_msg(
                 &current_state.log_path,
                 &format!(
-                    "Prepared context from {} sources ({} bytes) for query '{}'",
+                    "Prepared context from {} sources ({} bytes, num_ctx={}) for query '{}'",
                     source_count,
                     context.len(),
+                    num_ctx,
                     query
                 ),
             );
@@ -330,7 +381,9 @@ async fn main() {
             let ollama_req = OllamaRequest {
                 model: main_model,
                 prompt: full_prompt,
-                stream: false,
+                stream: true,
+                keep_alive: "15m",
+                options: OllamaOptions { num_ctx },
             };
 
             let endpoint = format!("{}/api/generate", ollama_instance);
@@ -341,60 +394,125 @@ async fn main() {
                 .send()
                 .await;
 
-            let (status_str, overview) = match res {
-                Ok(response) => {
+            match res {
+                Ok(mut response) => {
                     let http_status = response.status();
-                    match response.text().await {
-                        Ok(body_text) => {
-                            if let Ok(ollama_res) =
-                                serde_json::from_str::<OllamaResponse>(&body_text)
-                            {
-                                if let Some(err) = ollama_res.error {
-                                    ("Error".to_string(), format!("Ollama error: {}", err))
-                                } else if let Some(ans) = ollama_res.response {
-                                    ("Success".to_string(), ans)
-                                } else {
-                                    (
-                                        "Error".to_string(),
-                                        format!("Empty response from Ollama (HTTP {})", http_status),
-                                    )
+                    if !http_status.is_success() {
+                        let body_text = response.text().await.unwrap_or_default();
+                        let err_msg = serde_json::from_str::<OllamaResponse>(&body_text)
+                            .ok()
+                            .and_then(|r| r.error)
+                            .map(|e| format!("Ollama error: {}", e))
+                            .unwrap_or_else(|| format!("Ollama HTTP {}: {}", http_status, body_text));
+
+                        let _ = tx_clone
+                            .send(BackendAction::RustReply {
+                                status: "Error".to_string(),
+                                received_query: query,
+                                message: err_msg,
+                            })
+                            .await;
+                        return;
+                    }
+
+                    let mut accumulated = String::new();
+                    let mut line_buf = Vec::new();
+                    let mut sent_first_token = false;
+                    let mut last_send = Instant::now();
+                    let mut stream_err: Option<String> = None;
+
+                    loop {
+                        match response.chunk().await {
+                            Ok(Some(chunk)) => {
+                                line_buf.extend_from_slice(&chunk);
+                                while let Some(newline_pos) =
+                                    line_buf.iter().position(|&b| b == b'\n')
+                                {
+                                    let line_bytes: Vec<u8> =
+                                        line_buf.drain(..=newline_pos).collect();
+                                    let line_str = String::from_utf8_lossy(&line_bytes);
+                                    let trimmed = line_str.trim();
+                                    if trimmed.is_empty() {
+                                        continue;
+                                    }
+
+                                    if let Ok(part) =
+                                        serde_json::from_str::<OllamaResponse>(trimmed)
+                                    {
+                                        if let Some(err) = part.error {
+                                            stream_err = Some(format!("Ollama error: {}", err));
+                                            break;
+                                        }
+                                        if let Some(token) = part.response {
+                                            if !token.is_empty() {
+                                                accumulated.push_str(&token);
+                                                let should_flush = !sent_first_token
+                                                    || part.done
+                                                    || last_send.elapsed()
+                                                        >= Duration::from_millis(40);
+                                                if should_flush {
+                                                    sent_first_token = true;
+                                                    last_send = Instant::now();
+                                                    let _ = tx_clone
+                                                        .send(BackendAction::RustReply {
+                                                            status: "Streaming".to_string(),
+                                                            received_query: query.clone(),
+                                                            message: accumulated.clone(),
+                                                        })
+                                                        .await;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            } else if !http_status.is_success() {
-                                (
-                                    "Error".to_string(),
-                                    format!("Ollama HTTP {}: {}", http_status, body_text),
-                                )
-                            } else {
-                                (
-                                    "Error".to_string(),
-                                    "Error: Failed to parse Ollama JSON".to_string(),
-                                )
+                                if stream_err.is_some() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                stream_err = Some(format!("Error reading Ollama stream: {}", e));
+                                break;
                             }
                         }
-                        Err(e) => (
-                            "Error".to_string(),
-                            format!("Error reading Ollama response: {}", e),
-                        ),
                     }
+
+                    let (final_status, final_message) = if let Some(err) = stream_err {
+                        (
+                            "Error".to_string(),
+                            if accumulated.is_empty() {
+                                err
+                            } else {
+                                format!("{}\n\n[{}]", accumulated, err)
+                            },
+                        )
+                    } else if accumulated.is_empty() {
+                        (
+                            "Error".to_string(),
+                            "Empty response from Ollama.".to_string(),
+                        )
+                    } else {
+                        ("Success".to_string(), accumulated)
+                    };
+
+                    let _ = tx_clone
+                        .send(BackendAction::RustReply {
+                            status: final_status,
+                            received_query: query,
+                            message: final_message,
+                        })
+                        .await;
                 }
-                Err(e) => (
-                    "Error".to_string(),
-                    format!("Error contacting Ollama at {}: {}", ollama_instance, e),
-                ),
-            };
-
-            log_msg(
-                &current_state.log_path,
-                &format!("Sending reply with status '{}' for query '{}'", status_str, query),
-            );
-
-            let reply = BackendAction::RustReply {
-                status: status_str,
-                received_query: query,
-                message: overview,
-            };
-
-            let _ = tx_clone.send(reply).await;
+                Err(e) => {
+                    let _ = tx_clone
+                        .send(BackendAction::RustReply {
+                            status: "Error".to_string(),
+                            received_query: query,
+                            message: format!("Error contacting Ollama at {}: {}", ollama_instance, e),
+                        })
+                        .await;
+                }
+            }
         }));
     }
 
