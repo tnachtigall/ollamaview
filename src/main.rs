@@ -54,6 +54,8 @@ struct BrowserMessage {
     query_expansion: bool,
     #[serde(default)]
     helper_model: String,
+    #[serde(default)]
+    response_language: String,
 }
 
 #[derive(Serialize)]
@@ -301,6 +303,7 @@ async fn main() {
         let thinking_mode = message.thinking_mode;
         let query_expansion = message.query_expansion;
         let helper_model = message.helper_model.trim().to_string();
+        let response_language = message.response_language.trim().to_string();
 
         let tx_clone = tx_out.clone();
         let current_state = Arc::clone(&state);
@@ -505,13 +508,25 @@ async fn main() {
                 ),
             );
 
+            let lang_directive = if response_language.is_empty() || response_language.eq_ignore_ascii_case("auto") {
+                "IMPORTANT: Write your entire response in the same language as the user's search query.".to_string()
+            } else {
+                format!(
+                    "IMPORTANT: Write your entire response in {}, regardless of the language of the sources or query.",
+                    response_language
+                )
+            };
+
             let full_prompt = if context.is_empty() {
                 format!(
-                    "{}\n\n(Note: No external webpage content could be extracted.)\n\nQuery: {}",
-                    system_prompt, query
+                    "{}\n{}\n\n(Note: No external webpage content could be extracted.)\n\nQuery: {}",
+                    system_prompt, lang_directive, query
                 )
             } else {
-                format!("{}\n\nContext:\n{}\nQuery: {}", system_prompt, context, query)
+                format!(
+                    "{}\n{}\n\nContext:\n{}\nQuery: {}",
+                    system_prompt, lang_directive, context, query
+                )
             };
 
             let ollama_req = OllamaRequest {

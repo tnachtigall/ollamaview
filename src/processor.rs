@@ -10,25 +10,57 @@ const STOPWORDS: &[&str] = &[
     "being", "were", "your",
 ];
 
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3040..=0x30FF // Hiragana & Katakana
+        | 0x3400..=0x4DBF // CJK Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+    )
+}
+
+fn extract_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        let lower = word.to_lowercase();
+        let cjk_chars: Vec<char> = lower.chars().filter(|&c| is_cjk(c)).collect();
+        if !cjk_chars.is_empty() {
+            // Emit individual CJK characters and overlapping bigrams for unspaced CJK text
+            for &ch in &cjk_chars {
+                tokens.push(ch.to_string());
+            }
+            for window in cjk_chars.windows(2) {
+                let mut bi = String::with_capacity(6);
+                bi.push(window[0]);
+                bi.push(window[1]);
+                tokens.push(bi);
+            }
+        } else if lower.chars().count() >= 2 {
+            tokens.push(lower);
+        }
+    }
+    tokens
+}
+
 pub fn tokenize_query(query: &str) -> Vec<String> {
     let stop_set: HashSet<&str> = STOPWORDS.iter().copied().collect();
     let mut seen = HashSet::new();
     let mut terms = Vec::new();
 
-    for word in query.split(|c: char| !c.is_alphanumeric()) {
-        let lower = word.to_ascii_lowercase();
-        if lower.len() >= 2 && !stop_set.contains(lower.as_str()) && seen.insert(lower.clone()) {
-            terms.push(lower);
+    for tok in extract_tokens(query) {
+        if !stop_set.contains(tok.as_str()) && seen.insert(tok.clone()) {
+            terms.push(tok);
         }
     }
     terms
 }
 
 fn tokenize_paragraph(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 2)
-        .map(|w| w.to_ascii_lowercase())
-        .collect()
+    extract_tokens(text)
 }
 
 pub fn clean_html(html: &str, query_terms: &[String], max_chars: usize) -> Option<String> {
