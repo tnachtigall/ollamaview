@@ -5,7 +5,7 @@ mod processor;
 use backend_action::BackendAction;
 use fetcher::fetch_html;
 use futures::stream::{FuturesUnordered, StreamExt};
-use processor::clean_html;
+use processor::{clean_html, tokenize_query};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -304,16 +304,18 @@ async fn main() {
             // Scale source character budgets dynamically with chosen token context window and target_sources
             let max_total_context_chars = ((num_ctx.saturating_sub(1200)) as usize * 3).max(1800);
             let max_article_chars = (max_total_context_chars / target_sources).clamp(700, 12000);
+            let query_terms = Arc::new(tokenize_query(&query));
 
             let mut fetch_stream: FuturesUnordered<_> = urls
                 .into_iter()
                 .map(|url| {
                     let state_ref = Arc::clone(&current_state);
+                    let terms_ref = Arc::clone(&query_terms);
                     async move {
                         match fetch_html(&url, &state_ref.client).await {
                             Ok(raw_html) => {
                                 let cleaned = tokio::task::spawn_blocking(move || {
-                                    clean_html(&raw_html, max_article_chars)
+                                    clean_html(&raw_html, &terms_ref, max_article_chars)
                                 })
                                 .await
                                 .ok()
