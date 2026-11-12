@@ -322,27 +322,14 @@ async fn main() {
 
             let mut seen_urls: HashSet<String> = urls.iter().cloned().collect();
             let mut fetch_stream: FuturesUnordered<
-                std::pin::Pin<Box<dyn std::future::Future<Output = Option<(String, String)>> + Send>>,
+                std::pin::Pin<Box<dyn std::future::Future<Output = Option<(String, String, bool)>> + Send>>,
             > = FuturesUnordered::new();
 
             for url in urls {
                 let state_ref = Arc::clone(&current_state);
-                let terms_ref = Arc::clone(&shared_query_terms);
                 fetch_stream.push(Box::pin(async move {
                     match fetch_html(&url, &state_ref.client).await {
-                        Ok(raw_html) => {
-                            let snapshot = terms_ref
-                                .read()
-                                .map(|g| g.clone())
-                                .unwrap_or_default();
-                            let cleaned = tokio::task::spawn_blocking(move || {
-                                clean_html(&raw_html, &snapshot, max_article_chars, use_bm25)
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                            cleaned.map(|text| (url, text))
-                        }
+                        Ok(raw_html) => Some((url, raw_html, false)),
                         Err(err) => {
                             log_msg(&state_ref.log_path, &err);
                             None
@@ -375,7 +362,7 @@ async fn main() {
                     };
                     let endpoint = format!("{}/api/generate", ollama_exp);
                     let Ok(Ok(resp)) = tokio::time::timeout(
-                        Duration::from_millis(1500),
+                        Duration::from_millis(1800),
                         state_exp.client.post(&endpoint).json(&req).send(),
                     )
                     .await
@@ -430,62 +417,67 @@ async fn main() {
                 None
             };
 
-            let mut context = String::new();
-            let mut source_count = 0usize;
+            let mut serp_raw_pages: Vec<(String, String)> = Vec::new();
+            let mut expanded_raw_pages: Vec<(String, String)> = Vec::new();
+            let mut pending_expanded_fetches = 0usize;
             let overall_deadline = tokio::time::Instant::now() + OVERALL_FETCH_DEADLINE;
 
             loop {
                 tokio::select! {
                     biased;
-                    Some(extra_urls) = async {
+                    exp_msg = async {
                         match expansion_rx.as_mut() {
                             Some(rx) => rx.recv().await,
                             None => std::future::pending().await,
                         }
                     } => {
                         expansion_rx = None;
-                        for url in extra_urls {
-                            if seen_urls.insert(url.clone()) {
-                                let state_ref = Arc::clone(&current_state);
-                                let terms_ref = Arc::clone(&shared_query_terms);
-                                fetch_stream.push(Box::pin(async move {
-                                    match fetch_html(&url, &state_ref.client).await {
-                                        Ok(raw_html) => {
-                                            let snapshot = terms_ref
-                                                .read()
-                                                .map(|g| g.clone())
-                                                .unwrap_or_default();
-                                            let cleaned = tokio::task::spawn_blocking(move || {
-                                                clean_html(&raw_html, &snapshot, max_article_chars, use_bm25)
-                                            })
-                                            .await
-                                            .ok()
-                                            .flatten();
-                                            cleaned.map(|text| (url, text))
+                        if let Some(extra_urls) = exp_msg {
+                            for url in extra_urls {
+                                if seen_urls.insert(url.clone()) {
+                                    pending_expanded_fetches += 1;
+                                    let state_ref = Arc::clone(&current_state);
+                                    fetch_stream.push(Box::pin(async move {
+                                        match fetch_html(&url, &state_ref.client).await {
+                                            Ok(raw_html) => Some((url, raw_html, true)),
+                                            Err(err) => {
+                                                log_msg(&state_ref.log_path, &err);
+                                                None
+                                            }
                                         }
-                                        Err(err) => {
-                                            log_msg(&state_ref.log_path, &err);
-                                            None
-                                        }
-                                    }
-                                }));
+                                    }));
+                                }
                             }
+                        }
+                        if pending_expanded_fetches == 0 && serp_raw_pages.len() >= target_sources {
+                            break;
                         }
                     }
                     fetch_res = tokio::time::timeout_at(overall_deadline, fetch_stream.next()) => {
                         match fetch_res {
-                            Ok(Some(Some((url, clean_article)))) => {
-                                source_count += 1;
-                                context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
-                                context.push_str(&clean_article);
-                                context.push_str("\n\n");
+                            Ok(Some(Some((url, raw_html, is_expanded)))) => {
+                                if is_expanded {
+                                    pending_expanded_fetches = pending_expanded_fetches.saturating_sub(1);
+                                    expanded_raw_pages.push((url, raw_html));
+                                } else {
+                                    serp_raw_pages.push((url, raw_html));
+                                }
 
-                                if source_count >= target_sources || context.len() >= max_total_context_chars {
-                                    break;
+                                if expansion_rx.is_none() {
+                                    let want_expanded = if target_sources >= 2 && (pending_expanded_fetches > 0 || !expanded_raw_pages.is_empty()) {
+                                        1
+                                    } else {
+                                        0
+                                    };
+                                    let have_expanded = expanded_raw_pages.len() >= want_expanded;
+                                    let total_have = serp_raw_pages.len() + expanded_raw_pages.len();
+                                    if have_expanded && total_have >= target_sources {
+                                        break;
+                                    }
                                 }
                             }
                             Ok(Some(None)) => {
-                                // A URL failed or yielded empty text; continue waiting for remaining candidate URLs
+                                // A candidate URL failed; continue waiting for remaining URLs
                             }
                             Ok(None) => {
                                 if expansion_rx.is_none() {
@@ -497,6 +489,44 @@ async fn main() {
                                 break;
                             }
                         }
+                    }
+                }
+            }
+
+            // Combine up to (target_sources - 1) SERP pages + 1 expanded page (if available), then clean & rank with enriched BM25 terms
+            let mut selected_raw: Vec<(String, String)> = Vec::with_capacity(target_sources);
+            let reserve_expanded = if target_sources >= 2 && !expanded_raw_pages.is_empty() { 1 } else { 0 };
+            let serp_take = (target_sources - reserve_expanded).min(serp_raw_pages.len());
+            selected_raw.extend(serp_raw_pages.into_iter().take(serp_take));
+            for exp_page in expanded_raw_pages {
+                if selected_raw.len() < target_sources {
+                    selected_raw.push(exp_page);
+                }
+            }
+
+            let final_query_terms = shared_query_terms
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+
+            let mut context = String::new();
+            let mut source_count = 0usize;
+            for (url, raw_html) in selected_raw {
+                let terms_clone = final_query_terms.clone();
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    clean_html(&raw_html, &terms_clone, max_article_chars, use_bm25)
+                })
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(clean_article) = cleaned {
+                    source_count += 1;
+                    context.push_str(&format!("--- SOURCE {} ({}) ---\n", source_count, url));
+                    context.push_str(&clean_article);
+                    context.push_str("\n\n");
+                    if source_count >= target_sources || context.len() >= max_total_context_chars {
+                        break;
                     }
                 }
             }

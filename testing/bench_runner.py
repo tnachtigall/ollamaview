@@ -264,10 +264,10 @@ def build_article_html(query_id: str, doc_idx: int, is_expanded: bool = False) -
             "guidelines for configuring and troubleshooting system behavior in production environments."
         )
 
-    # Add ~3,200 chars of realistic filler paragraphs BEFORE the deep fact paragraph
-    # so naive prefix truncation at small/medium budgets misses the buried fact,
-    # whereas BM25 ranks the deep fact paragraph to the top!
-    for i in range(8):
+    # Add ~6,000 chars of realistic filler paragraphs BEFORE the deep fact paragraph
+    # so naive prefix truncation misses the buried fact, whereas BM25 ranks the deep
+    # fact paragraph to the top.
+    for i in range(14):
         filler = FILLER_PARAGRAPHS[(doc_idx + i) % len(FILLER_PARAGRAPHS)]
         paragraphs.append(f"[Section {i + 1}.{doc_idx}] {filler}")
 
@@ -524,7 +524,7 @@ def main():
     parser = argparse.ArgumentParser(description="Ollamaview Benchmark & Evaluation Harness")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434", help="Ollama endpoint URL")
     parser.add_argument("--main-model", default="gemma4:12B", help="Primary Ollama model")
-    parser.add_argument("--helper-model", default="qwen:1.7B", help="Secondary helper model for query expansion")
+    parser.add_argument("--helper-model", default="qwen3:1.7b", help="Secondary helper model for query expansion")
     parser.add_argument("--binary", default=str(DEFAULT_BINARY), help="Path to compiled ollamaview binary")
     parser.add_argument("--sweep", choices=["all", "1", "2", "3", "quick"], default="all", help="Which sweep(s) to run")
     parser.add_argument("--sim-latency-ms", type=int, default=80, help="Simulated per-URL network latency (ms) on local fixture server")
@@ -562,19 +562,19 @@ def main():
     # Build configurations for requested sweeps
     configs = []
     if args.sweep in ("all", "1", "quick"):
-        for ctx in ([2048, 4096] if args.sweep == "quick" else [2048, 4096, 6144, 8192]):
+        for ctx in ([2048, 4096] if args.sweep == "quick" else [2048, 4096, 8192]):
             for bm25 in [False, True]:
                 configs.append({
                     "sweep": "Sweep 1: BM25 & Context Size",
-                    "label": f"ctx={ctx} | BM25={'ON' if bm25 else 'OFF'}",
+                    "label": f"ctx={ctx} | BM25={'ON' if bm25 else 'OFF'} (N=3)",
                     "contextSize": ctx,
-                    "maxSources": 5,
+                    "maxSources": 3,
                     "bm25Enabled": bm25,
                     "queryExpansion": False,
                 })
 
     if args.sweep in ("all", "2"):
-        for n_src in [2, 3, 5, 7, 8]:
+        for n_src in [1, 2, 3, 4, 5]:
             configs.append({
                 "sweep": "Sweep 2: Source Count (N)",
                 "label": f"N={n_src} sources (ctx=4096, BM25=ON)",
@@ -588,9 +588,9 @@ def main():
         for exp in [False, True]:
             configs.append({
                 "sweep": "Sweep 3: Multi-Model Query Expansion",
-                "label": f"Expansion={'ON (' + args.helper_model + ')' if exp else 'OFF (Baseline)'}",
+                "label": f"Expansion={'ON (' + args.helper_model + ')' if exp else 'OFF (Baseline)'} (N=3, ctx=4096)",
                 "contextSize": 4096,
-                "maxSources": 5,
+                "maxSources": 3,
                 "bm25Enabled": True,
                 "queryExpansion": exp,
             })
@@ -747,3 +747,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
