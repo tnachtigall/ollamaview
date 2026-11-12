@@ -503,7 +503,7 @@ async fn main() {
         let current_state = Arc::clone(&state);
 
         active_task = Some(tokio::spawn(async move {
-            const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(2400);
+            const OVERALL_FETCH_DEADLINE: Duration = Duration::from_millis(3400);
             let task_start = Instant::now();
 
             // Scale source character budgets dynamically with chosen token context window and target_sources
@@ -520,7 +520,19 @@ async fn main() {
                 let state_ref = Arc::clone(&current_state);
                 fetch_stream.push(Box::pin(async move {
                     match fetch_html(&url, &state_ref.client).await {
-                        Ok(raw_html) => Some((url, raw_html, false)),
+                        Ok(raw_html) => {
+                            let has_content = tokio::task::spawn_blocking(move || {
+                                if clean_html(&raw_html, &[], 250, false).is_some() {
+                                    Some(raw_html)
+                                } else {
+                                    None
+                                }
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            has_content.map(|html| (url, html, false))
+                        }
                         Err(err) => {
                             log_msg(&state_ref.log_path, &err);
                             None
@@ -553,7 +565,7 @@ async fn main() {
                     };
                     let endpoint = format!("{}/api/generate", ollama_exp);
                     let Ok(Ok(resp)) = tokio::time::timeout(
-                        Duration::from_millis(1800),
+                        Duration::from_millis(2400),
                         state_exp.client.post(&endpoint).json(&req).send(),
                     )
                     .await
@@ -630,7 +642,19 @@ async fn main() {
                                     let state_ref = Arc::clone(&current_state);
                                     fetch_stream.push(Box::pin(async move {
                                         match fetch_html(&url, &state_ref.client).await {
-                                            Ok(raw_html) => Some((url, raw_html, true)),
+                                            Ok(raw_html) => {
+                                                let has_content = tokio::task::spawn_blocking(move || {
+                                                    if clean_html(&raw_html, &[], 250, false).is_some() {
+                                                        Some(raw_html)
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .await
+                                                .ok()
+                                                .flatten();
+                                                has_content.map(|html| (url, html, true))
+                                            }
                                             Err(err) => {
                                                 log_msg(&state_ref.log_path, &err);
                                                 None
@@ -668,7 +692,7 @@ async fn main() {
                                 }
                             }
                             Ok(Some(None)) => {
-                                // A candidate URL failed; continue waiting for remaining URLs
+                                // A candidate URL failed or was a cookie/JS stub; continue waiting for remaining URLs
                             }
                             Ok(None) => {
                                 if expansion_rx.is_none() {
@@ -748,7 +772,7 @@ async fn main() {
             };
 
             let citation_directive = if include_citations && !used_sources.is_empty() {
-                "\nIMPORTANT: Append inline numeric citations (e.g., [1], [1, 2]) to the end of sentences or bullet points to attribute claims to the numbered --- SOURCE N --- sections in the Context. Never cite source numbers that do not exist in the Context."
+                "\nIMPORTANT: Append inline numeric citations (e.g., [1], [1, 2]) ONLY at the end of important bullet points and paragraphs to attribute key claims to the numbered --- SOURCE N --- sections in the Context. Do NOT place citations after every sentence within a paragraph, as that hurts readability. Never cite source numbers that do not exist in the Context."
             } else {
                 ""
             };

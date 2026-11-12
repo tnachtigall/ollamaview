@@ -2,7 +2,7 @@ use std::time::Duration;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 
-const FETCH_TIMEOUT: Duration = Duration::from_millis(2500);
+const FETCH_TIMEOUT: Duration = Duration::from_millis(3500);
 const MAX_HTML_BYTES: usize = 256 * 1024; // 256 KB cap for fast download & DOM parsing
 
 pub async fn fetch_html(url: &str, client: &Client) -> Result<String, String> {
@@ -87,7 +87,7 @@ pub async fn fetch_ddg_urls(subquery: &str, client: &Client, limit: usize) -> Ve
 
     let Ok(resp) = client
         .get(&search_url)
-        .timeout(Duration::from_millis(1500))
+        .timeout(Duration::from_millis(2200))
         .send()
         .await
     else {
