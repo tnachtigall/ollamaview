@@ -25,8 +25,9 @@ target
 
 /target
 
- # TODO: generalize with regex
-com.till.ollamaview.json
+# Local native messaging manifest
+ollamaview.host.json
+com.*.ollamaview.json
 .aider*
 testing/results/
 testing/fixtures/cache/

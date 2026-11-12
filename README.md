@@ -1,8 +1,8 @@
 # ollamaview
 
-A local-first, zero-telemetry AI search overview for **Firefox** and **LibreWolf**, written in Rust and powered strictly by your local **Ollama** instance.
+A local-first, zero-telemetry AI search overview for **Firefox** and Gecko-based browsers (such as **LibreWolf**, **Zen**, **Waterfox**, and **Floorp**), written in Rust and powered strictly by your local **Ollama** instance.
 
-When the sidebar is open on **Google**, **DuckDuckGo**, or **Ecosia**, `ollamaview` fetches the organic search results, ranks the relevant passages with BM25, and streams a cited Markdown summary directly from your local model. When the sidebar is closed, the extension remains completely inactive.
+When the sidebar is open on your browser (currently supported: Google, DuckDuckGo, Ecosia), `ollamaview` fetches the organic search results, ranks the relevant passages with BM25, and streams a cited Markdown summary directly from your local model. When the sidebar is closed, the extension remains completely inactive.
 
 ---
 
@@ -21,23 +21,23 @@ When the sidebar is open on **Google**, **DuckDuckGo**, or **Ecosia**, `ollamavi
 ### Prerequisites
 - [Rust / Cargo](https://rustup.rs/)
 - [Ollama](https://ollama.com/) running locally
-- **Firefox** or **LibreWolf**
+- **Firefox** or any Gecko-based derivative (**LibreWolf**, **Zen**, **Waterfox**, **Floorp**)
 
 ### 1. Build the Backend
 
 ```bash
-git clone https://github.com/till/ollamaview.git
+git clone https://github.com/tnachtigall/ollamaview.git
 cd ollamaview
 cargo build --release
 ```
 
 ### 2. Register the Native Messaging Host
 
-Create `com.till.ollamaview.json` with the absolute path to your compiled binary (`ollamaview` or `ollamaview.exe`):
+Create `ollamaview.host.json` with the absolute path to your compiled binary (`ollamaview` or `ollamaview.exe`):
 
 ```json
 {
-  "name": "com.till.ollamaview",
+  "name": "ollamaview.host",
   "description": "Local AI Overview powered by Ollama",
   "path": "/absolute/path/to/ollamaview/target/release/ollamaview",
   "type": "stdio",
@@ -49,13 +49,13 @@ Create `com.till.ollamaview.json` with the absolute path to your compiled binary
 
 Place the manifest in your OS native messaging directory:
 
-- **Linux:** `~/.mozilla/native-messaging-hosts/com.till.ollamaview.json` *(LibreWolf: `~/.librewolf/native-messaging-hosts/`)*
-- **macOS:** `~/Library/Application Support/Mozilla/NativeMessagingHosts/com.till.ollamaview.json` *(LibreWolf: `~/Library/Application Support/LibreWolf/NativeMessagingHosts/`)*
-- **Windows:** Point the registry key `HKCU\Software\Mozilla\NativeMessagingHosts\com.till.ollamaview` to the JSON file path.
+- **Linux:** `~/.mozilla/native-messaging-hosts/ollamaview.host.json` *(LibreWolf: `~/.librewolf/native-messaging-hosts/`)*
+- **macOS:** `~/Library/Application Support/Mozilla/NativeMessagingHosts/ollamaview.host.json` *(LibreWolf: `~/Library/Application Support/LibreWolf/NativeMessagingHosts/`)*
+- **Windows:** Point the registry key `HKCU\Software\Mozilla\NativeMessagingHosts\ollamaview.host` to the JSON file path.
 
 ### 3. Load the Extension
 
-1. Clone [`ollamaview-ext`](https://github.com/till/ollamaview-ext).
+1. Clone [`ollamaview-ext`](https://github.com/tnachtigall/ollamaview-ext).
 2. Open `about:debugging#/runtime/this-firefox` and click **Load Temporary Add-on...**
 3. Select `manifest.json` from `ollamaview-ext`.
 4. Open the sidebar (`Ctrl+B`), click **⚙ Config**, click **Fetch**, and select a model.
@@ -63,8 +63,6 @@ Place the manifest in your OS native messaging directory:
 ---
 
 ## Configuration
-
-Clicking **Apply Recommended Config** resets all settings (except your endpoint and model selection) to defaults.
 
 ### Basic Settings
 - **Ollama Endpoint** (`http://127.0.0.1:11434`): Local or LAN Ollama URL.
@@ -81,7 +79,7 @@ Clicking **Apply Recommended Config** resets all settings (except your endpoint 
 
 ---
 
-## Recommended Models (8–24 GB VRAM)
+## Model Recommendations (for 8–24 GB VRAM cards, per November 2026)
 
 | Tier / Role | Model | Notes |
 | :--- | :--- | :--- |
