@@ -1,8 +1,10 @@
 # ollamaview
 
-A local-first, zero-telemetry AI search overview for **Firefox** and Gecko-based browsers (such as **LibreWolf**, **Zen**, **Waterfox**, and **Floorp**), written in Rust and powered strictly by your local **Ollama** instance.
+Local-first, zero-telemetry AI search overview for **Firefox** and Gecko-based browsers (such as **LibreWolf**, **Zen**, **Waterfox**, and **Floorp**), written in Rust and powered directly by your local **Ollama** instance.
 
-When the sidebar is open on your browser (currently supported: Google, DuckDuckGo, Ecosia), `ollamaview` fetches the organic search results, ranks the relevant passages with BM25, and streams a cited Markdown summary directly from your local model. When the sidebar is closed, the extension remains completely inactive.
+This repo contains the native messaging backend for the frontend extension https://github.com/tnachtigall/ollamaview-ext.
+
+When the Extension sidebar is open on your search engine (currently supported: Google, DuckDuckGo, Ecosia), `ollamaview` fetches the organic search results, ranks the relevant passages with BM25, and streams a cited Markdown summary directly from your local model. When the sidebar is closed, the extension remains completely inactive.
 
 ---
 
@@ -54,6 +56,8 @@ Place the manifest in your OS native messaging directory:
 - **Windows:** Point the registry key `HKCU\Software\Mozilla\NativeMessagingHosts\ollamaview.host` to the JSON file path.
 
 ### 3. Load the Extension
+
+> **Note:** The extension is not yet signed or published on Mozilla Add-ons (AMO) and can currently only be loaded as a temporary add-on.
 
 1. Clone [`ollamaview-ext`](https://github.com/tnachtigall/ollamaview-ext).
 2. Open `about:debugging#/runtime/this-firefox` and click **Load Temporary Add-on...**
