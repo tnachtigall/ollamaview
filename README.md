@@ -59,8 +59,8 @@ Place the manifest in your OS native messaging directory:
 
 > **Note:** The extension is not yet listed on the Mozilla Add-on Marketplace
 
-1. open [`ollamaview-ext`](https://github.com/tnachtigall/ollamaview-ext).
-2. Follow the installation instructions in the readme of the extension repo
+1. open [`ollamaview-ext`](https://github.com/tnachtigall/ollamaview-ext)
+2. follow the installation instructions in the readme of the extension repo
 
 ---
 
