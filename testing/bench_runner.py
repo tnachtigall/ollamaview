@@ -30,11 +30,13 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTING_DIR = Path(__file__).resolve().parent
 QUERIES_PATH = TESTING_DIR / "queries.json"
+FIXTURES_PATH = TESTING_DIR / "fixture_articles.json"
 RESULTS_DIR = TESTING_DIR / "results"
 DEFAULT_BINARY = REPO_ROOT / "target" / "debug" / "ollamaview"
 
@@ -65,204 +67,31 @@ DEFAULT_SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 # Deterministic Realistic Long-Form HTML Fixture Generator
 # ---------------------------------------------------------------------------
-# Generates ~4,500-character realistic technical articles where early paragraphs
-# contain general background/history and deep paragraphs (65-85% down the page)
-# or specific source indices (Sources #1..#8) hold the ground-truth fact nuggets.
-FILLER_PARAGRAPHS = [
-    (
-        "In modern systems engineering, understanding the architectural history of runtime "
-        "schedulers and storage engines helps contextualize how defaults evolved over time. "
-        "Early implementations prioritized single-threaded simplicity over multi-core scalability, "
-        "relying on cooperative yielding and global locks to coordinate shared state across workers."
-    ),
-    (
-        "As hardware shifted toward high core counts and non-uniform memory access (NUMA) topologies, "
-        "contention on centralized work queues became a primary bottleneck. Engineers introduced "
-        "work-stealing deques, per-thread arenas, and asynchronous I/O readiness notification "
-        "mechanisms such as epoll on Linux, kqueue on BSD/macOS, and IOCP on Windows."
-    ),
-    (
-        "When profiling production workloads, observability tools frequently highlight tail-latency "
-        "spikes caused by head-of-line blocking. Even a brief synchronous syscall or unindexed scan "
-        "on a shared executor thread can stall ratusan unrelated tasks waiting in the local run queue, "
-        "degrading p99 response times across the entire service mesh."
-    ),
-    (
-        "To mitigate these risks, operators often deploy canary environments with synthetic load "
-        "generators that replay production traffic patterns. Telemetry collected from eBPF probes "
-        "and hardware performance counters reveals cache-miss ratios, context-switch frequencies, "
-        "and page-fault latencies under sustained throughput."
-    ),
-    (
-        "Documentation across community forums and legacy blog posts often references outdated "
-        "configuration flags from earlier major releases. Always verify version-specific behavior "
-        "against the canonical reference manual before applying tuning parameters in production."
-    ),
-    (
-        "Furthermore, cross-platform compatibility layers introduce subtle differences in buffer "
-        "alignment, file descriptor inheritance, and environment variable propagation when processes "
-        "are launched by desktop session managers or sandboxed browser runtimes."
-    ),
-]
+# Generates ~6,000-character realistic technical articles where early paragraphs
+# contain general background/history loaded from fixture_articles.json and deep
+# paragraphs or specific source indices (Sources #1..#8) hold fact nuggets.
+@lru_cache(maxsize=1)
+def load_article_fixtures(fixtures_path: Path = FIXTURES_PATH) -> dict:
+    """Load and validate filler paragraphs and per-query fixture articles from JSON."""
+    data = json.loads(fixtures_path.read_text(encoding="utf-8"))
+    filler_paragraphs = data.get("filler_paragraphs")
+    if not isinstance(filler_paragraphs, list) or not filler_paragraphs or not all(
+        isinstance(p, str) and p.strip() for p in filler_paragraphs
+    ):
+        raise ValueError(f"Expected non-empty 'filler_paragraphs' string list in {fixtures_path}")
 
-QUERY_FIXTURE_ARTICLES = {
-    "q1_deep_needle_tokio": {
-        # Facts buried deep at the bottom of the articles (tests BM25 vs Naive Prefix Truncation)
-        "deep_facts": {
-            0: (
-                "Blocking Thread Pool Configuration and Limits: When an application calls "
-                "spawn_blocking to offload synchronous file I/O or CPU-heavy work off the async "
-                "worker threads, Tokio spawns dedicated OS threads on demand. By default, the "
-                "max_blocking_threads limit is set to 512 threads per runtime instance."
-            ),
-            1: (
-                "Idle Blocking Thread Lifecycle: Threads in the blocking pool are not kept alive "
-                "indefinitely when idle. Builder::thread_keep_alive configures how long an idle "
-                "blocking pool thread waits for new work before terminating; the default "
-                "thread_keep_alive timeout is 10 seconds."
-            ),
-            2: (
-                "If more than 512 blocking tasks are submitted concurrently via spawn_blocking, "
-                "additional tasks wait in an unbounded FIFO queue until an active blocking thread "
-                "finishes its closure or new capacity becomes available before the 10 seconds "
-                "thread_keep_alive window expires."
-            ),
-        },
-        "expansion_facts": (
-            "Summary Reference Table: Tokio Runtime Builder defaults — worker_threads defaults to "
-            "the number of CPU cores, max_blocking_threads defaults to 512, and thread_keep_alive "
-            "defaults to 10 seconds for threads spawned via spawn_blocking."
-        ),
-    },
-    "q2_deep_needle_sqlite": {
-        "deep_facts": {
-            0: (
-                "Write-Ahead Logging (WAL) Checkpoint Thresholds: In SQLite WAL mode, modified "
-                "pages are appended to the -wal file until a checkpoint transfers them back into "
-                "the main database file. By default, PRAGMA wal_autocheckpoint is set to 1000 pages."
-            ),
-            1: (
-                "Because the default SQLite database page_size is 4096 bytes (4 KB), the default "
-                "wal_autocheckpoint threshold of 1000 pages triggers an automatic passive checkpoint "
-                "whenever the write-ahead log reaches approximately 4 MB on disk."
-            ),
-            2: (
-                "Concurrency and Lock Contention: When a writer or checkpoint encounters a locked "
-                "database, SQLite immediately returns SQLITE_BUSY unless PRAGMA busy_timeout is "
-                "configured to retry for a specified number of milliseconds."
-            ),
-        },
-        "expansion_facts": (
-            "SQLite WAL Tuning Quick Reference: PRAGMA wal_autocheckpoint=1000 (with 4096 byte "
-            "pages) and PRAGMA busy_timeout prevent immediate SQLITE_BUSY errors under concurrent writes."
-        ),
-    },
-    "q3_ambiguous_wayland": {
-        # Initial pages only mention partial symptoms unless expanded subqueries or deeper sources are used
-        "deep_facts": {
-            0: (
-                "Diagnosing XWayland Blur on Linux: When Firefox runs under XWayland on a HiDPI "
-                "display with 125% or 150% fractional scaling, the compositor upscales the rasterized "
-                "X11 buffer, resulting in blurry text. Check about:support under the Window Protocol "
-                "field to see whether Firefox is using xwayland or native wayland."
-            ),
-            2: (
-                "Enabling Native Wayland Backend: To switch Firefox from XWayland to the native "
-                "Wayland protocol on older builds or custom launchers, set the environment variable "
-                "MOZ_ENABLE_WAYLAND=1 in your environment or desktop entry."
-            ),
-            4: (
-                "Native Fractional Scale Protocol: Inside about:config, toggle "
-                "widget.wayland.fractional-scale.enabled to true so Firefox renders at the exact "
-                "fractional pixel ratio using the wp-fractional-scale-v1 Wayland protocol."
-            ),
-        },
-        "expansion_facts": (
-            "Complete Fix for Blurry Firefox on Wayland Fractional Scaling: 1) Verify Window Protocol "
-            "in about:support is wayland (set MOZ_ENABLE_WAYLAND=1 if needed). 2) In about:config, "
-            "set widget.wayland.fractional-scale.enabled to true for crisp HiDPI text."
-        ),
-    },
-    "q4_ambiguous_ollama_vram": {
-        "deep_facts": {
-            0: (
-                "Multi-Model Co-Residency in Ollama: By default, Ollama may evict an existing model "
-                "from GPU memory when a second model is requested if concurrency limits or VRAM "
-                "thresholds are exceeded. Set OLLAMA_MAX_LOADED_MODELS=2 (or higher) in the server "
-                "environment to allow multiple models to remain loaded simultaneously."
-            ),
-            2: (
-                "Preventing Idle Eviction: Use OLLAMA_KEEP_ALIVE (for example OLLAMA_KEEP_ALIVE=15m "
-                "or -1) or the per-request keep_alive parameter so loaded models are not unloaded "
-                "after the default 5-minute inactivity timer."
-            ),
-            4: (
-                "Reducing KV Cache VRAM Footprint: When co-hosting two models on a 16 GB GPU, enable "
-                "OLLAMA_FLASH_ATTENTION=1 and set OLLAMA_KV_CACHE_TYPE=q8_0 (or q4_0) to halve KV "
-                "cache memory consumption."
-            ),
-        },
-        "expansion_facts": (
-            "Ollama Multi-Model VRAM Guide: Configure OLLAMA_MAX_LOADED_MODELS=2 and OLLAMA_KEEP_ALIVE "
-            "to keep both models in VRAM, and enable OLLAMA_FLASH_ATTENTION=1 with "
-            "OLLAMA_KV_CACHE_TYPE=q8_0 to save GPU memory."
-        ),
-    },
-    "q5_broad_compression": {
-        # Facts distributed across sources 0..5 to test Source Count N (N=2 vs N=5 vs N=8)
-        "deep_facts": {
-            0: (
-                "LZ4 Performance Profile: LZ4 is engineered for extreme speed, achieving compression "
-                "rates over 500 MB/s per core and decompression speeds reaching multiple GB/s, making "
-                "it ideal for real-time IPC and RAM disks despite a lower compression ratio."
-            ),
-            1: (
-                "Zstandard (zstd) Balanced Design: Developed at Facebook, Zstandard bridges the gap "
-                "between LZ4 and deflate, offering tunable levels from 1 to 19 plus high-compression "
-                "--ultra levels (20 to 22) with fast dictionary decompression."
-            ),
-            3: (
-                "Brotli for Static Web Assets: Brotli achieves higher compression density than "
-                "default Zstandard on HTML, CSS, and JavaScript text payloads, though at higher "
-                "compression levels (9-11) its encoding speed is significantly slower than LZ4 or zstd."
-            ),
-            4: (
-                "Summary Tradeoff: Choose LZ4 when sub-millisecond latency (>500 MB/s) dominates, "
-                "Zstandard (with optional --ultra levels) for general-purpose storage and archives, "
-                "and Brotli for pre-compressed HTTP web assets."
-            ),
-        },
-        "expansion_facts": (
-            "Compression Benchmark Comparison: LZ4 (>500 MB/s) vs Zstandard (zstd, levels 1-19 and "
-            "--ultra 20-22) vs Brotli (high web asset compression ratio)."
-        ),
-    },
-    "q6_direct_native_messaging": {
-        # Direct fact in the very first paragraph of Source #0 (baseline speed check)
-        "lead_fact": (
-            "Firefox WebExtensions Native Messaging Protocol Specification: Each message exchanged "
-            "over stdin and stdout is serialized as JSON UTF-8 and prefixed with a 32-bit length "
-            "integer in native byte order. The maximum message size sent from the native application "
-            "to the browser via stdout is 1 MB, while messages sent from the browser extension to "
-            "the native host via stdin can be up to 4 GB. The host manifest JSON must list the "
-            "extension ID inside the allowed_extensions array."
-        ),
-        "deep_facts": {
-            0: (
-                "Ensure stdout is flushed immediately after writing the 32-bit native byte order "
-                "header and JSON payload, and keep each reply under the 1 MB stdout limit."
-            ),
-        },
-        "expansion_facts": (
-            "Firefox Native Messaging limits: 32-bit native byte order length header, 1 MB max "
-            "from host (stdout), 4 GB max to host (stdin), authorized via allowed_extensions."
-        ),
-    },
-}
+    articles = data.get("query_fixture_articles")
+    if not isinstance(articles, dict) or not articles:
+        raise ValueError(f"Expected non-empty 'query_fixture_articles' object in {fixtures_path}")
+
+    return data
 
 
 def build_article_html(query_id: str, doc_idx: int, is_expanded: bool = False) -> str:
-    spec = QUERY_FIXTURE_ARTICLES.get(query_id, {})
+    """Build deterministic HTML for a benchmark fixture article."""
+    fixtures = load_article_fixtures()
+    filler_paragraphs = fixtures["filler_paragraphs"]
+    spec = fixtures["query_fixture_articles"].get(query_id, {})
     paragraphs = []
 
     if is_expanded and "expansion_facts" in spec:
@@ -281,15 +110,16 @@ def build_article_html(query_id: str, doc_idx: int, is_expanded: bool = False) -
     # so naive prefix truncation misses the buried fact, whereas BM25 ranks the deep
     # fact paragraph to the top.
     for i in range(14):
-        filler = FILLER_PARAGRAPHS[(doc_idx + i) % len(FILLER_PARAGRAPHS)]
+        filler = filler_paragraphs[(doc_idx + i) % len(filler_paragraphs)]
         paragraphs.append(f"[Section {i + 1}.{doc_idx}] {filler}")
 
     deep_map = spec.get("deep_facts", {})
-    if doc_idx in deep_map:
-        paragraphs.append(deep_map[doc_idx])
+    deep_fact = deep_map.get(str(doc_idx))
+    if deep_fact is not None:
+        paragraphs.append(deep_fact)
 
     for i in range(3):
-        filler = FILLER_PARAGRAPHS[(doc_idx + i + 3) % len(FILLER_PARAGRAPHS)]
+        filler = filler_paragraphs[(doc_idx + i + 3) % len(filler_paragraphs)]
         paragraphs.append(f"[Appendix {i + 1}] {filler}")
 
     body_p = "\n".join(f"<p>{p}</p>" for p in paragraphs)
