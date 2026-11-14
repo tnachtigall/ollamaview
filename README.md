@@ -83,12 +83,15 @@ Place the manifest in your OS native messaging directory:
 
 ## Model Recommendations (for 8–24 GB VRAM cards, per November 2026)
 
+> In my testing, gemma4 models performed by far the best, and unsurprisingly provided results most similar to Googles native AI Overview. 
+> Feel free to experiment with other models and system prompts and share your findings!
+
 | Tier / Role | Model | Notes |
 | :--- | :--- | :--- |
 | **Primary Default (12–16 GB VRAM)** | **`gemma4:12B`** | Best overall grounding, formatting, and accuracy while leaving VRAM headroom on 16 GB cards. Keep `Thinking Mode: OFF` for fast TTFT. |
-| **Fast / 8–12 GB VRAM** | **`qwen3:8b`** / **`llama3.1:8b`** | Sub-second prompt prefill and fast generation on midrange GPUs. |
-| **24 GB VRAM** | **`qwen3:14b`** / **`mistral-small:24b`** | Strongest synthesis on dense, multi-source technical queries. |
-| **Expansion Helper (~1.3 GB VRAM)** | **`qwen3:1.7b`** | Fast companion model for **Query Expansion**; co-resides in VRAM alongside `gemma4:12B`. |
+| **Fast / 8–12 GB VRAM** | **`gemma4:e4b`** | Sub-second prompt prefill and fast generation on notebooks and mid range gpus. |
+| **24 GB VRAM** | **TBD** | (can't test 24B models on my setup, open for suggestions, as I would like to offer a recommendation here) |
+| **Expansion Helper (~1.3 GB VRAM)** | **`qwen3:1.7b`** **`gemma4:e2b`** | Fast companion model for **Query Expansion**; co-resides in VRAM alongside primary model. |
 
 > **Tip:** When using **Query Expansion**, set `OLLAMA_MAX_LOADED_MODELS=2` and `OLLAMA_FLASH_ATTENTION=1` in your Ollama environment so both models stay loaded in VRAM.
 
