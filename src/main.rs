@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+// Temporary debug toggle: when true, skip Ollama and return the extracted BM25 context directly.
+const DEBUG_RETURN_EXTRACTED_CONTEXT: bool = false;
+
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a precise, privacy-focused search synthesis engine. \
 Your task is to generate a dense, objective overview that directly answers the user's query using ONLY the provided \"--- SOURCE N ---\" search excerpts.\n\n\
 ### Core Rules\n\
@@ -830,6 +833,35 @@ async fn main() {
                     query
                 ),
             );
+
+            if DEBUG_RETURN_EXTRACTED_CONTEXT {
+                let debug_body = if context.is_empty() {
+                    "(No external webpage content could be extracted.)".to_string()
+                } else {
+                    context
+                };
+                let debug_message = format!(
+                    "**[DEBUG MODE: Extracted Context]**\n\
+                    - **Sources:** {} (`num_ctx={}`, `bm25={}`, `fetch_ms={}ms`, `bytes={}`)\n\
+                    - **Query Terms:** `{:?}`\n\n\
+                    ---\n\n{}",
+                    source_count,
+                    num_ctx,
+                    use_bm25,
+                    fetch_ms,
+                    debug_body.len(),
+                    final_query_terms,
+                    debug_body
+                );
+                let _ = tx_clone
+                    .send(BackendAction::RustReply {
+                        status: "Success".to_string(),
+                        received_query: query,
+                        message: debug_message,
+                    })
+                    .await;
+                return;
+            }
 
             let lang_directive = if response_language.is_empty() || response_language.eq_ignore_ascii_case("auto") {
                 "IMPORTANT: Write your entire response in the same language as the user's search query.".to_string()
