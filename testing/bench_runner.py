@@ -19,12 +19,14 @@ import csv
 import http.server
 import json
 import os
+import platform
 import re
 import socketserver
 import statistics
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -248,6 +250,26 @@ def get_ollama_vram_snapshot(endpoint: str):
 # ---------------------------------------------------------------------------
 # Native Messaging Binary Driver
 # ---------------------------------------------------------------------------
+def default_log_path(env: dict) -> Path:
+    system = platform.system()
+    if system == "Darwin":
+        home = env.get("HOME")
+        if home:
+            return Path(home) / "Library" / "Logs" / "ollamaview" / "ollama_host.log"
+    elif system == "Windows":
+        local_app_data = env.get("LOCALAPPDATA") or env.get("APPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "ollamaview" / "logs" / "ollama_host.log"
+    else:
+        state_home = env.get("XDG_STATE_HOME")
+        if state_home:
+            return Path(state_home) / "ollamaview" / "ollama_host.log"
+        home = env.get("HOME")
+        if home:
+            return Path(home) / ".local" / "state" / "ollamaview" / "ollama_host.log"
+    return Path(tempfile.gettempdir()) / "ollamaview" / "ollama_host.log"
+
+
 def run_single_query(
     binary_path: Path,
     payload: dict,
@@ -258,7 +280,7 @@ def run_single_query(
     if ddg_override_url:
         env["OLLAMAVIEW_DDG_URL"] = ddg_override_url
 
-    log_path = Path(env.get("HOME", "/tmp")) / "ollama_host.log"
+    log_path = default_log_path(env)
 
     proc = subprocess.Popen(
         [str(binary_path)],
@@ -311,7 +333,7 @@ def run_single_query(
         except Exception:
             proc.kill()
 
-    # Parse internal fetch_ms and context_bytes from ~/ollama_host.log
+    # Parse internal fetch_ms and context_bytes from the host log file
     fetch_ms = None
     context_bytes = 0
     sources_used = 0

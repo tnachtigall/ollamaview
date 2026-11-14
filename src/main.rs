@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -28,7 +29,7 @@ Your task is to generate a dense, objective overview that directly answers the u
 
 struct AppState {
     client: Client,
-    log_path: String,
+    log_path: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -99,7 +100,51 @@ struct OllamaModelInfo {
     name: String,
 }
 
-fn log_msg(log_path: &str, msg: &str) {
+fn default_log_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Logs")
+                .join("ollamaview")
+                .join("ollama_host.log");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .filter(|v| !v.is_empty())
+        {
+            return PathBuf::from(local_app_data)
+                .join("ollamaview")
+                .join("logs")
+                .join("ollama_host.log");
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(state_home) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(state_home)
+                .join("ollamaview")
+                .join("ollama_host.log");
+        }
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("state")
+                .join("ollamaview")
+                .join("ollama_host.log");
+        }
+    }
+
+    std::env::temp_dir().join("ollamaview").join("ollama_host.log")
+}
+
+fn log_msg(log_path: &Path, msg: &str) {
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(f, "{}", msg);
     }
@@ -305,8 +350,10 @@ fn format_with_citations(text: &str, sources: &[String], append_footer: bool) ->
 
 #[tokio::main]
 async fn main() {
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_path = format!("{}/ollama_host.log", home_dir);
+    let log_path = default_log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     if let Ok(mut f) = std::fs::File::create(&log_path) {
         let _ = writeln!(
